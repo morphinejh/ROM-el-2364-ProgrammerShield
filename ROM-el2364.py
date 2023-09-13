@@ -4,9 +4,14 @@ import hashlib
 import os
 import sys
 import math
+import time
+
+#Linux example:
+#commPort = '/dev/ttyACM0'
+#Windows example:
+commPort = 'COM16'
 
 progname = "Arduino EEPROM Programmer for AT49F512 chips"
-
 helpmsg='''usage: '''+sys.argv[0]+''' action [-v start_address [end_address]] [filename]
 
 action           Can be one of write, read, or verify
@@ -34,7 +39,7 @@ start_address    Starting address for the operation. This is in hex format
                  and may optionally be preceeded by '0x'
 
 end_address      The address at which to end the operation, optionally preceeded
-                 by '0x'. The default is 0x10000 or, if a file is specified, it
+                 by '0x'. The default is 0x20000 or, if a file is specified, it
                  will default to start_address + the length of the file (in
                  bytes). NOTE: The end_address is non-inclusive; the address is
                  never actually altered or read (i.e., an address range of of
@@ -76,14 +81,14 @@ for i in range(2,len(sys.argv)):
         address = int(sys.argv[i],base=16)
         if args['start_address'] == -1:
             args['start_address'] = address
-            if args['start_address'] > 0xFFFF:
-                args['start_address'] = 0xFFFF
-                print("WARNING: Start address is past end of chip, using 0x10000 instead")
+            if args['start_address'] > 0x1FFFF:
+                args['start_address'] = 0x1FFFF
+                print("WARNING: Start address is past end of chip, using 0x20000 instead")
         elif args['end_address'] == -1:
             args['end_address'] = address
-            if args['end_address'] > 0x10000:
-                args['end_address'] = 0x10000
-                print("WARNING: End address is past end of chip, using 0x10000 instead")
+            if args['end_address'] > 0x20000:
+                args['end_address'] = 0x20000
+                print("WARNING: End address is past end of chip, using 0x20000 instead")
         if args['start_address'] != -1 and args['end_address'] != -1 and args['start_address'] > args['end_address']:
             tmp = args['start_address']
             args['start_address'] = args['end_address']
@@ -116,9 +121,9 @@ if args['mode'] == 'write':
     if args['end_address'] == -1:
         #divide the file size by 8 to get the number of addresses needed, then subtract one since the first byte is #0
         args['end_address'] = args['start_address']+filesize
-        if args['end_address'] > 0x10000:
+        if args['end_address'] > 0x20000:
             print("WARNING: File is larger than chip, whole file will not be written.")
-            args['end_address'] = 0x10000
+            args['end_address'] = 0x20000
     if args['end_address'] > args['start_address']+filesize:
         args['end_address'] = args['start_address']+filesize
 
@@ -126,7 +131,7 @@ elif args['mode'] == 'read':
     if args['start_address'] == -1:
         args['start_address'] = 0
     if args['end_address'] == -1:
-        args['end_address'] = 0x10000
+        args['end_address'] = 0x20000
 
 elif args['mode'] == 'verify':
     #If file is given, check that it exists
@@ -142,7 +147,7 @@ elif args['mode'] == 'verify':
             print_usage_error('File "'+args['filename']+'"\'s size does not match the address range given, verification WILL fail.')
     else:
         if args['end_address'] == -1:
-            args['end_address'] = 0x10000
+            args['end_address'] = 0x20000
 
 elif args['mode'] == 'erase':
     if args['start_address'] != -1 or args['end_address'] != -1:
@@ -152,14 +157,14 @@ elif args['mode'] == 'erase':
 print("Args:")
 for arg in args:
     if arg == 'start_address' or arg == 'end_address':
-        print(arg + ": " + str(args[arg]) + " ({:04x})".format(args[arg]))
+        print(arg + ": " + str(args[arg]) + " ({:06x})".format(args[arg]))
     else:
       print(arg + ": " + str(args[arg]))
 print();
 
 def init_arduino():
     print("Setting up serial.")
-    ser = serial.Serial('/dev/ttyACM0', 115200, timeout=600)
+    ser = serial.Serial(commPort, 115200, timeout=3)
     print("Waiting for Arduino...")
     while ser.in_waiting < 4:
         continue
@@ -197,13 +202,12 @@ def read_range(start, end, ser, dump=True, file=None):
     hash = hashlib.sha256()
     outputbuffer = b''
     buffersize = 16
-    print(end - start)
     for i in range(0,end - start):
         #repeat last command, with next address in Arduino
         packet = b'\x01R'
         #Initial packet, set starting address
         if i == 0:
-            packet = b'\x03R' + start.to_bytes(2,'big')
+            packet = b'\x05R' + start.to_bytes(4,'big')
         ser.write(packet);
         packet_len = ser.read(1)
         while int(packet_len[0]) != 1:
@@ -261,9 +265,12 @@ if args['mode'] == 'read':
         file = None
 
     ser = init_arduino()
-
-    print("Reading " + str(args['end_address'] - args['start_address'] + 1) + " bytes")
+    print("Adress Range: " +  str(args['start_address']) + " to " + str(args['end_address']-1))
+    print("Reading " + str(args['end_address'] - args['start_address']) + " bytes")
+    startTime = time.monotonic()
     read_range(args['start_address'], args['end_address'], ser, True, file)
+    durationTime = time.monotonic()-startTime
+    print("Read in " + str(durationTime) + " seconds.")
 
 if args['mode'] == 'write':
     try:
@@ -290,11 +297,13 @@ if args['mode'] == 'write':
     ser = init_arduino();
 
     print('Writing file to EEPROM...')
-
+    startTime = time.monotonic()
     for i in range(0,args['end_address'] - args['start_address']):
         packet = b'\x02W' + int(filebuffer[i]).to_bytes(1, 'big')
         if i == 0:
-            packet = b'\x04\x57' + args['start_address'].to_bytes(2, 'big') + int(filebuffer[i]).to_bytes(1, 'big')
+            packet = b'\x06W' + args['start_address'].to_bytes(4, 'big') + int(filebuffer[i]).to_bytes(1, 'big')
+        #debug#print(str(filebuffer[i]))
+        #debug#print(packet)
         ser.write(packet)
         packet_len = ser.read(1)
         while int(packet_len[0]) != 1:
@@ -312,8 +321,10 @@ if args['mode'] == 'write':
                 print(ser.readline().decode())
         else:
             print(ser.readline().decode())
-    print()
 
+    durationTime = time.monotonic()-startTime
+    print("Written in " + str(durationTime) + " seconds.")
+    print()
     print('Done!')
 
     if args['do_verify']:
@@ -324,7 +335,6 @@ if args['mode'] == 'write':
             print("Verification succeeded!")
         else:
             print("Verification failed!")
-
 
 if args['mode'] == 'verify':
     ser = init_arduino();

@@ -1,30 +1,11 @@
-//EEPROMCE is always low!
-const int EEPROMWE = 2;
-const int EEPROMOE = 3;
-
-const int ADDROE = 5;
-const int ADDRCLK = 6;
-const int ADDRSER = 7;
-
-const int DATAOUTOE = 9;
-const int DATAINOE = 4;
-const int DATACLK = 10;
-const int DATAOUTSER = 11;
-const int DATAINSER = 8;
-
-const int DEBUGBTN = 12;
-
-const bool debug = false;
-bool debugbutton = false;
-
-enum Mode {
-  READ = LOW,
-  WRITE = HIGH,
-  ERASE,
-  VERIFY
-};
+#include "ROM-el2364.hpp"
 
 Mode mode = READ;
+
+void printMessage(String message){
+  Serial.write(message.length()+2);
+  Serial.println(message);
+}
 
 void setup() {
   pinMode(ADDROE, OUTPUT);
@@ -46,85 +27,31 @@ void setup() {
   digitalWrite(EEPROMOE, HIGH);
   pinMode(EEPROMWE, OUTPUT);
   digitalWrite(EEPROMWE, HIGH);
-  pinMode(DEBUGBTN, INPUT_PULLUP);
-  //If the debug button is held at startup, enable debugging mode
-  if( digitalRead(DEBUGBTN) == LOW )
-  {
-    debugbutton = true;
-    while(digitalRead(DEBUGBTN) == LOW )
-      continue;
-  }
-  char serialbuff[5];
-  memset(serialbuff, 0x00, sizeof(serialbuff));
+
+  pinMode(RSTROMEL, OUTPUT);
+  digitalWrite(RSTROMEL, HIGH);
+  pinMode(ADDR16, OUTPUT);
+  digitalWrite(ADDR16, HIGH);
+
   Serial.begin(115200);
-  //if( debugbutton )
-    Serial.setTimeout(600000);
-  //else
-  //  Serial.setTimeout(30000);
+  Serial.setTimeout(3000);
   Serial.print("INIT");
   //Let's do some byte transfers!
 }
 
-void printMessage(String message)
-{
-  Serial.write(message.length()+2);
-  Serial.println(message);
-}
-
-String printBinary(byte data)
-{
-  String temp = "";
-  for( int i = 7; i >= 0; i-- )
-  {
-    if( data & (1 << i) )
-      temp += "1";
-    else
-      temp += "0";
-  }
-  return temp;
-}
-
-void waitfordbg()
-{
-  if( debugbutton )
-  {
-    if( digitalRead(DEBUGBTN) == HIGH )
-      while( digitalRead(DEBUGBTN) == HIGH );
-    //Set serial timeout to 10 minutes
-    unsigned long timeout = millis() + 500;
-    while( digitalRead(DEBUGBTN) == LOW )
-    {
-      if( millis() > timeout )
-        break;
-    }
-    delay(75);
-  }
-}
-
-void debugBtnMessage(String message)
-{
-  if( debugbutton )
-  {
-    printMessage(message);
-    waitfordbg();
-  }
-}
-
-void setReadMode()
-{
+void setReadMode(){
   if( mode == READ )
     return;
   //Disable shift register (write)
-  digitalWrite(DATAOUTOE, HIGH);
+  DATAOUTOE_Set(HIGH);//digitalWrite(DATAOUTOE, HIGH);
   mode = READ;
 }
 
-void setWriteMode()
-{
+void setWriteMode(){
   if( mode == WRITE )
     return;
   //Disable shift-in register (read)
-  digitalWrite(DATAINOE, LOW);
+  DATAINOE_Set(LOW);//digitalWrite(DATAINOE, LOW);
   mode = WRITE;
 }
 
@@ -162,55 +89,62 @@ void shiftByteOut(byte data, bool noclock, int clkpin, int serpin, int oepin)
 }
 
 //Shift byte in from SN74HC165
-byte shiftByteIn(int clkpin, int serpin, int latchpin, short bits = 8)
-{
-  byte input = 0;
-  digitalWrite(clkpin, HIGH);
+uint8_t shiftByteIn(int clkpin, int serpin, int latchpin, short bits = 8){//return shiftByteIn(DATACLK, DATAINSER, DATAINOE, bits);
+  uint8_t input = 0;
+  DATACLK_Set(HIGH);//digitalWrite(clkpin, HIGH);
+
   if( latchpin == DATAINOE )
-    digitalWrite(DATAINOE, LOW);
+    DATAINOE_Set(LOW);//digitalWrite(DATAINOE, LOW);
   else
     digitalWrite(latchpin, LOW);
+
   if( latchpin == DATAINOE )
-    digitalWrite(DATAINOE, HIGH);
+    DATAINOE_Set(HIGH);//digitalWrite(DATAINOE, HIGH);
   else
     digitalWrite(latchpin, HIGH);
+    
   //Data shift in MSB-first
-  for ( int i = 0; i < bits; i++ )
-  {
-    digitalWrite(clkpin, HIGH);
-    //Don't clock first, 74HC165 outputs first byte
-    //as soon as latch goes high
-    debugBtnMessage("Shift-in serial data: " + String(int(digitalRead(serpin))));
-    input |= digitalRead(serpin) << ((bits-1)-i);
-    //debugBtnMessage("input: " + printBinary(input));
-    digitalWrite(clkpin, LOW);
+  for ( int i = 0; i < bits; i++ ){
+    DATACLK_Set(HIGH);//digitalWrite(clkpin, HIGH);
+    //Don't clock first, 74HC165 outputs first byte as soon as latch goes high
+    __builtin_avr_delay_cycles(5);//TODO: Possible less delay
+    input |= DATAINSER_Read() << ((bits-1)-i);//input |= digitalRead(serpin) << ((bits-1)-i);
+    DATACLK_Set(LOW);//digitalWrite(clkpin, LOW);
   }
-  digitalWrite(DATAINOE, LOW);
+  DATAINOE_Set(LOW);//digitalWrite(DATAINOE, LOW);
   return input;
 }
 
 //Write to address lines
-void shiftAddress(unsigned short addr)
-{
-  shiftByteOut(byte((addr >> 8) & 0x00FF), true, ADDRCLK, ADDRSER, ADDROE);
-  shiftByteOut(byte(addr & 0x00FF), false, ADDRCLK, ADDRSER, ADDROE);
-  debugBtnMessage("Shifted out address: " + printBinary(addr >> 8) + printBinary(addr & 0xFF));
+void shiftAddress(uint32_t addrin){
+  uint16_t addr = addrin & 0x0000FFFF;
+  uint8_t out[2];
+
+  out[0]=(addr>>8)&0xFF;
+  out[1]=0xFF&addr;
+
+  if(addrin > 0xFFFF){
+    digitalWrite(ADDR16,HIGH);
+  }
+  else{
+    digitalWrite(ADDR16,LOW);
+  }
+
+  shiftByteOut(out[0], true, ADDRCLK, ADDRSER, ADDROE);
+  shiftByteOut(out[1], false, ADDRCLK, ADDRSER, ADDROE);
 }
 
 //Write to data lines
-void shiftData(byte data)
-{
+void shiftData(uint8_t data){
   setWriteMode();
   shiftByteOut(data, false, DATACLK, DATAOUTSER, DATAOUTOE);
-  debugBtnMessage("Shifted out data " + printBinary(data) + " out");
 }
 
 //Shift data lines in
 //Arguments:
 //bits: How many bits to shift in (useful in waitForToggleBit() so that cycles
 //      aren't wasted shifting in bits we don't care about.)
-byte shiftInData(short bits = 8)
-{
+uint8_t shiftInData(short bits = 8){
   setReadMode();
   return shiftByteIn(DATACLK, DATAINSER, DATAINOE, bits);
 }
@@ -236,51 +170,40 @@ byte shiftInData(short bits = 8)
 }*/
 
 //Implementation of "AC Load" from AT49F512 datasheet
-void ACLoad(unsigned short addr, byte data)
-{
+void ACLoad(uint32_t addrin, uint8_t data){
   setWriteMode();
-  digitalWrite(EEPROMOE, HIGH);
-  shiftAddress(addr);
-  digitalWrite(EEPROMWE, LOW);
+  EEPROMOE_Set(HIGH);//digitalWrite(EEPROMOE, HIGH);
+  shiftAddress(addrin);
+  EEPROMWE_Set(LOW);//digitalWrite(EEPROMWE, LOW);
   __builtin_avr_delay_cycles(2); //Delay an extra cycle to satisfy tWP = 90ns
   shiftData(data);
-  digitalWrite(EEPROMWE, HIGH);
+  EEPROMWE_Set(HIGH);//digitalWrite(EEPROMWE, HIGH);
   __builtin_avr_delay_cycles(2); //Delay cycles to satisfy tWPH = 90ns
 }
 
 //Implementation of "AC Read" from AT49F512 datasheet
-byte ACRead(unsigned short addr)
-{
+uint8_t ACRead(uint32_t addrin){
   setReadMode();
-  digitalWrite(EEPROMWE, HIGH);
-  shiftAddress(addr);
-  digitalWrite(EEPROMOE, LOW);
+  EEPROMWE_Set(HIGH);//digitalWrite(EEPROMWE, HIGH);
+  shiftAddress(addrin);
+  EEPROMOE_Set(LOW);//digitalWrite(EEPROMOE, LOW);
   __builtin_avr_delay_cycles(2);
-  debugBtnMessage("Check data in");
-  byte input = shiftInData();
-  digitalWrite(EEPROMOE, HIGH);
+  uint8_t input = shiftInData();
+  EEPROMOE_Set(HIGH);//digitalWrite(EEPROMOE, HIGH);
   return input;
 }
 
-byte writeAddress(unsigned short addr, byte data)
-{
-  if( debug )
-    return 0x00;
+uint8_t writeAddress(uint32_t addrin, uint8_t data){
   ACLoad(0x5555, 0xAA);
   ACLoad(0x2AAA, 0x55);
   ACLoad(0x5555, 0xA0);
-  ACLoad(addr, data);
+  ACLoad(addrin, data);
   digitalWrite(EEPROMOE, LOW);
-  debugBtnMessage("Check address (" + printBinary((addr>>8)) + printBinary(addr & 0x00FF) + ") and data (" + printBinary(data) + ")");
-  //dataPoll(addr, data);
   waitForToggleBit();
   return 0x00;
 }
 
-void eraseChip()
-{
-  if( debug )
-    return;
+void eraseChip(){
   digitalWrite(EEPROMOE, HIGH);
   ACLoad(0x5555, 0xAA);
   ACLoad(0x2AAA, 0x55);
@@ -296,19 +219,27 @@ void eraseChip()
 //"During a program or erase operation, successive attempts to read data from the device
 //will result in I/O6 toggling between one and zero. Once the program cycle has completed,
 //I/O6 will stop toggling and valid data will be read."
-void waitForToggleBit()
-{
+void waitForToggleBit(){
+  return;
+  uint8_t initial = 0;
+  uint8_t nextbit = 0;
   setReadMode();
-  digitalWrite(EEPROMOE, LOW);
+  EEPROMOE_Set(LOW);//digitalWrite(EEPROMOE, LOW);
   //Store bit 7 (I/O 6)
-  byte initial = shiftInData(2) & 0x40;
-  while( true )
-  {
-    digitalWrite(EEPROMOE, HIGH);
+  //byte initial = shiftInData(2) & 0x40;
+  initial = shiftInData(2) & 0x40;
+  while( true ){
+    EEPROMOE_Set(HIGH);//digitalWrite(EEPROMOE, HIGH);
+
+    //Needs to be high for 150ns, One cycle is ~62.5ns
+    //At 16MHz this is a delay of ~187.5ns
+    //However, a digital write already takes 3.4us = 3,400ns!!
+    //dont' wait.
     __builtin_avr_delay_cycles(3);
-    digitalWrite(EEPROMOE, LOW);
+    EEPROMOE_Set(LOW);//digitalWrite(EEPROMOE, LOW);
+    
     //Check bit 7 again
-    byte nextbit = shiftInData(2) & 0x40;
+    nextbit = shiftInData(2) & 0x40;
     //If bit 7 is stable, the write/erase has finished.
     if( nextbit == initial )
       break;
@@ -317,27 +248,24 @@ void waitForToggleBit()
   }
 }
 
-void verifyRange(unsigned short startaddr, unsigned short endaddr)
-{
-  for ( unsigned short i = startaddr; i <= endaddr; i++ )
+void verifyRange(uint32_t startaddr, uint32_t endaddr){
+  for (uint32_t i = startaddr; i <= endaddr; i++ )
   {
     Serial.write(0x01);
     Serial.write(ACRead(i));
   }
 }
 
-unsigned short address = 0x0000;
-
 void loop() {
-  byte data;
-  byte serialbuffer[6];
+  uint8_t data;
+  uint8_t serialbuffer[10];
   memset(serialbuffer, 0x00, sizeof(serialbuffer));
   /*Protocol definition:
   <packet> ::= <length> <command> | <length> <command> <data>
   <data> ::= <address> | <address> <byte>
   <command> ::= 'R' | 'W' | 'E' comment <erase command>
   <byte> ::= <a single byte>
-  <address> ::= <2-byte address>
+  <address> ::= <4-byte address>
   <length> ::= <1-byte length of packet (excluding length byte itself)>
 
   This allows two modes of operation:
@@ -373,7 +301,7 @@ void loop() {
     continue;
 
   Serial.readBytes(serialbuffer, 1);
-  byte packetlen = serialbuffer[0];
+  uint8_t packetlen = serialbuffer[0];
 
   while ( Serial.available() != packetlen )
     continue;
@@ -381,23 +309,25 @@ void loop() {
   Serial.readBytes(serialbuffer, packetlen);
 
   //Read mode
-  if ( serialbuffer[0] == 'R' )
-  {
+  if ( serialbuffer[0] == 'R' ){
     setReadMode();
     //No address given
-    if ( packetlen == 1 )
-    {
+    if ( packetlen == 1 ){
       data = ACRead(address);
       Serial.write(0x01);
       Serial.write(data);
-      //Serial.flush();
     }
     //Address given
-    else
-    {
-      unsigned short packetaddress = serialbuffer[1] << 8;
+    else{
+      uint32_t packetaddress = serialbuffer[1];
+      packetaddress <<= 8;
       packetaddress += serialbuffer[2];
+      packetaddress <<= 8;
+      packetaddress += serialbuffer[3];
+      packetaddress <<= 8;
+      packetaddress += serialbuffer[4];
       address = packetaddress;
+
       data = ACRead(packetaddress);
       Serial.write(0x01);
       Serial.write(data);
@@ -405,36 +335,39 @@ void loop() {
     address++;
   }
   //Write mode
-  else if ( serialbuffer[0] == 'W' )
-  {
+  else if ( serialbuffer[0] == 'W' ){
     unsigned short retval;
     setWriteMode();
     //No address given
-    if ( packetlen == 2 )
+    if ( packetlen == 2 ){
       retval = writeAddress(address, serialbuffer[1]);
+    }
     //Address given
-    else
-    {
-      unsigned short packetaddress = (serialbuffer[1] << 8) & 0xFF00;
+    else{
+      uint32_t packetaddress = serialbuffer[1];
+      packetaddress <<= 8;
       packetaddress += serialbuffer[2];
+      packetaddress <<= 8;
+      packetaddress += serialbuffer[3];
+      packetaddress <<= 8;
+      packetaddress += serialbuffer[4];
       address = packetaddress;
-      byte retval = writeAddress(packetaddress, serialbuffer[3]);
+
+      uint8_t retval = writeAddress(address, serialbuffer[5]);
     }
     Serial.write(0x01);
     Serial.write(retval);
     address++;
   }
   //Erase mode
-  else if ( serialbuffer[0] == byte('E') )
-  {
+  else if ( serialbuffer[0] == byte('E') ){
     mode = ERASE;
     eraseChip();
     Serial.write(0x01);
     Serial.write(0x01);
   }
   //Verify mode (UNTESTED)
-  else
-  {
+  else{
     mode = VERIFY;
     unsigned short startAddress = serialbuffer[1] << 8;
     startAddress += serialbuffer[2];

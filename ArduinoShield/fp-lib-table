@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "2364")(type "KiCad")(uri "${KIPRJMOD}/Arduino_Rom-el_Sheild.pretty")(options "")(descr ""))
+)
